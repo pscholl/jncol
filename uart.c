@@ -42,7 +42,7 @@
 #include <AppHardwareApi.h>
 
 #define GREETING "This is uart0, please select the operation mode like this:\n"\
-                 "115200 8N1 rtscts\n"
+                 "115200 8N1\n"
 
 PROCESS(uart_process, "Uart Process");
 AUTOSTART_PROCESSES(&uart_process);
@@ -50,7 +50,7 @@ AUTOSTART_PROCESSES(&uart_process);
 static flowcontrol = false;
 
 /* NOTE: also change rts/cts/irq macro when changing uart */
-#define UART E_AHI_UART_0
+#define UART E_AHI_UART_1
 
 #if UART == E_AHI_UART_1
 #define RTS  E_AHI_DIO18_INT
@@ -189,8 +189,6 @@ uart_init(long baudrate, long databits, char parity, long stopbits, char rtscts)
   vAHI_UartSetBaudrate(UART, baudrate);
   vAHI_UartSetControl(UART, evenparity, enableparity, databits, stopbits,
       E_AHI_UART_RTS_HIGH);
-  //vAHI_UartSetBaudrate(UART, 115200);
-  //vAHI_UartSetControl(UART, 1, 0, E_AHI_UART_WORD_LEN_8, E_AHI_UART_1_STOP_BIT, E_AHI_UART_RTS_HIGH);
 
   /* disable rts/cts line usage by uart, we control them by ourself
    * as there is no automatic flow ctrl and manual pin ctrl through
@@ -334,21 +332,23 @@ PROCESS_THREAD(uart_process, ev, data)
 
       /* new data received, write it to uart */
       if (uip_newdata())
+      {
         uart_write(uip_appdata, uip_datalen());
+        printf("%d bytes\n", uip_datalen());
+      }
+
+      if (uip_acked())
+        sbuf_len = 0;
+
+      if (uip_rexmit() && sbuf_len > 0)
+        uip_send(sbuf, sbuf_len);
 
       /* get new data from the uart when the current sbuf has been sent */
-      if (uip_poll())
+      if (uip_poll() && sbuf_len==0)
       {
         sbuf_len = uart_read(sbuf, sizeof(sbuf));
         //sbuf_len = snprintf(sbuf, sizeof(sbuf), "polled %d bytes\n", sbuf_len);
-
-        if (sbuf_len > 0)
-        {
-          do {
-            uip_send(sbuf, sbuf_len);
-            PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event && (uip_rexmit() || uip_acked()));
-          } while (!uip_acked());
-        }
+        if (sbuf_len > 0) uip_send(sbuf, sbuf_len);
       }
     };
   }

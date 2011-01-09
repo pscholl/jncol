@@ -6,23 +6,32 @@ features are currently supported:
 
 == serial line ==
 
- The serial lines can be accessed on port 4404 (UART0) and 4405 (UART1). After a
-modeline, that selects the baudrate and data format of the serial line, has been
-sent all traffic on the serial line will be relayed through the tcp stream and
-vice versa. This creates a wireless UART connection. For example if the jennic
+ The serial lines can be accessed on port 4404 (UART0). After a modeline, that
+selects the baudrate and data format of the serial line, has been sent all
+traffic on the serial line will be relayed through the tcp stream and vice
+versa. This creates a wireless UART connection. For example if the jennic
 modules address is 3ffe::15:86:00:00:0b:67:c3, and your network is properly
-setup you can access the modules serial port by opening a tcp connection on port
-4404. We use telnet here as an example:
+configured you can access the modules serial port by opening a tcp connection on
+port 4404. We use telnet here as an example:
 
 > telnet 3ffe::15:86:00:00:0b:67:c3 4404
-  115200 8N1 rtscts
+  115200 8N1
   ...
 
  This opens up UART0 on the jennic module, selects the baudrate to be 115200
-bauds in 8bit, no parity, 1 stop bit and RTS/CTS flowcontrol. After that data
-can be exchanged through the serial port.
+bauds in 8bit, no parity, 1 stop bit and no flowcontrol (flowcontrol is not
+implemented at the moment). After that all data seen on the serial port will be
+sent to the pc through the telnet connection and vice-versa.
 
  A word of warning, the tcp stream can easily become defunct if the remote
 device is unable to handle data at the speed it is sent through the tcp stream.
 So you have to make sure that the device connected on the serial line is able to
 handle the data at the speed it is sent through the tcp stream.
+
+== TODO ==
+ - implement using a different uart port without recompilation (currently only
+   uart0 is usable)
+ - implement uart flow control (see JN-AN-1069 802.15.4 Wireless UART with Flow
+   Control source code, for automatic and manual flowcontrol)
+ - implement other busses like i2c, spi, dio
+ - generalize the command handler (i.e. similar to the telnet server)
