@@ -1,32 +1,80 @@
-= jncol - jennic protocol collection =
+stun - Serial Tunnel
+====================
 
- This project collects protocols for accessing Jennics microcontroller
-functionality remotely through a 6lowpan based tcp/ip stream. The following
-features are currently supported:
+ Application to control serial ports on the jn5139 over a tcp/ip stream or udp
+packet stream. After an initial configuration packet, data on the uart is sent
+to the client and data sent from the client is sent to over the serial line.
+This creates a serial over tcp/udp tunnel.
 
-== serial line ==
+ Two operation modes are supported:
+  - raw mode, data is simply forwarded as is.
+  - frame mode, data from the serial port has to comply to the framing protocol
+                described below and is sent to the tcp client with a inter-frame
+                timestamp and sequence number.
 
- The serial lines can be accessed on port 4404 (UART0). After a modeline, that
-selects the baudrate and data format of the serial line, has been sent all
-traffic on the serial line will be relayed through the tcp stream and vice
-versa. This creates a wireless UART connection. For example if the jennic
-modules address is 3ffe::15:86:00:00:0b:67:c3, and your network is properly
-configured you can access the modules serial port by opening a tcp connection on
-port 4404. We use telnet here as an example:
+TCP operation
+-------------
+
+ Configuration has to be done after connecting to the tcp server. Baudrate, data
+format and  flow control make up the modeline which configures the serial port.
+This modeline is sent as a ascii line.  For example if the jennic modules
+address is 3ffe::15:86:00:00:0b:67:c3, and your network is properly configured
+you can access the modules serial port by opening a tcp connection on port 4404.
+We use telnet here as an example:
 
 > telnet 3ffe::15:86:00:00:0b:67:c3 4404
   115200 8N1
   ...
 
  This opens up UART0 on the jennic module, selects the baudrate to be 115200
-bauds in 8bit, no parity, 1 stop bit and no flowcontrol (flowcontrol is not
-implemented at the moment). After that all data seen on the serial port will be
-sent to the pc through the telnet connection and vice-versa.
+bauds in 8bit, no parity, 1 stop bit and no flowcontrol. After that all data
+seen on the serial port will be sent to the pc through the telnet connection and
+vice-versa.
 
- A word of warning, the tcp stream can easily become defunct if the remote
-device is unable to handle data at the speed it is sent through the tcp stream.
-So you have to make sure that the device connected on the serial line is able to
-handle the data at the speed it is sent through the tcp stream.
+ The modeline has to comply to this format:
+     (UART) [FRAMING](BAUDRATE) (DATABITS)(PARITY)(STOPBITS) [FLOWCONTROL]
+ where anything in [] is optional, and anything in () is mandatory:
+
+ - UART, either UART0 or UART1, selects the serial port to use for that
+         connection.
+ - FRAMING, either R for raw mode or F for framing serial protocol, defaults to
+            raw mode.
+ - BAUDRATE, baudrate of the serial port, one of 9600, 19200, 38400, 57600,
+             115200, 230400, 460800, 921600, 1843200
+ - DATABITS, either 7 or 8
+ - PARITY, N for no-parity, E for even parity, O for odd parity
+ - STOPBITS, 1 for 1 stop bit, 2 for 2 stop bits (or 1.5 bits if 7 databits are
+             selected)
+ - FLOWCONTROL, RTSCTS if rts/cts flow control is to be enabled. DTR/DTS and
+                XON/XOFF flowcontrol is not supported.
+
+ After the modeline has been sent, the server relays data either in RAW mode,
+where all data is sent as is vice versa between the client and the serial port.
+Or in FRAMING mode, where data sent to the client as frames with according to
+this struct:
+    typedef struct st_data_t {
+        uint8_t  len;        /* length of the complete frame   */
+        uint16_t delta_t;    /* time difference to last packet */
+        uint16_t seq;        /* sequence number of the frame   */
+        uint8_t  data[];     /* raw data */
+    } st_data_t;
+
+ The framing protocol on the serial line has to adhere to the following struct:
+    typedef struct ser_frame_t {
+        uint8_t len;         /* length of the frame */
+        uint8_t data[];      /* data buffer         */
+    } ser_frame_t;
+ So framing is implemented as length-prefixed frames with a hardware reset line
+to get the uart slave into sync with the master. In framing mode of operation,
+framing is implemented by syncing the slave with a hardware reset line and
+length-prefixed messages. In high-speed operation flow control is mandatory.
+
+ RTS/CTS flowcontrol works by asserting (pulling/checking high whenever no
+buffer space is available). The RTS is pulled by the Jennic module when there is
+no space left for receiving. Data is only sent by the jennic module when the CTS
+line is high. No timeout is implemented, so the module can lock-up when the CTS
+line is driven wrongly.
+
 
 == TODO ==
  - implement using a different uart port without recompilation (currently only
@@ -35,3 +83,4 @@ handle the data at the speed it is sent through the tcp stream.
    Control source code, for automatic and manual flowcontrol)
  - implement other busses like i2c, spi, dio
  - generalize the command handler (i.e. similar to the telnet server)
+ - rfc2217 compliance?!?
