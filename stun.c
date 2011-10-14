@@ -36,20 +36,34 @@
 #include "contiki-net.h"
 #include "gdb2.h"
 #include "leds.h"
+#include "dev/uart0.h"
+#include "dev/uart1.h"
+#include "lib/ringbuf.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <AppHardwareApi.h>
 
-#define GREETING "remote uart port, please select the operation mode like this:\n"\
-                 "UART0 115200 8N1\n"
+#define GREETING "remote uart port, please select baudrate and uart to use like this:\n"\
+                 "(uart is always operating at 8N1 with no flow control)\n"\
+                 "UART0 115200\n"
 
-PROCESS_NAME(uart_process);
-PROCESS(uart_process, "Uart Process");
-AUTOSTART_PROCESSES(&uart_process);
+PROCESS(stun_process, "uart process");
 
-unsigned int
+#ifdef STUN_CONF_BUFFER_SIZE
+#define BUFSIZE STUN_CONF_BUFFER_SIZE
+#else
+#define BUFSIZE 1024
+#endif
+
+#if (BUFSIZE & (BUFSIZE - 1)) != 0
+#error STUN_CONF_BUFFER_SIZE must be a power of two (i.e., 1, 2, 4, 8, 16, 32, 64, ...).
+#endif
+
+static struct  ringbuf uartbuf;
+static uint8_t uartbuf_data[BUFSIZE];
+
+static unsigned int
 atoi(const char *str, const char **retstr)
 {
   int i;
@@ -78,46 +92,45 @@ atoi(const char *str, const char **retstr)
   return num;
 }
 
+
+static uart_cb_handler(unsigned char c)
+{
+  ringbuf_put(&uartbuf, c);
+  process_poll(&stun_process);
+}
+
+static void (*uart_writeb)(unsigned char c) = NULL;
+
 static int8_t
-uart_parse_and_init(char *s, size_t *n, bool *framing_mode, uint32_t *port)
+uart_parse_and_init(char *s, size_t *n)
   /* parse the modeline:
    *
-   * (UART) [FRAMING](BAUDRATE) (DATABITS)(PARITY)(STOPBITS) [FLOWCONTROL]
-   * where anything in [] is optional, and anything in () is mandatory:
+   * (UART) (BAUDRATE)
    * - UART, either UART0 or UART1, selects the serial port to use for that
    *         connection.
-   * - FRAMING, either R for raw mode or F for framing serial protocol, defaults to
-   *            raw mode.
    * - BAUDRATE, baudrate of the serial port, one of 9600, 19200, 38400, 57600,
    *             115200, 230400, 460800, 921600, 1843200
-   * - DATABITS, either 7 or 8
-   * - PARITY, N for no-parity, E for even parity, O for odd parity
-   * - STOPBITS, 1 for 1 stop bit, 2 for 2 stop bits (or 1.5 bits if 7 databits are
-   *             selected)
-   * - FLOWCONTROL, RTSCTS if rts/cts flow control is to be enabled. DTR/DTS and
-   *                XON/XOFF flowcontrol is not supported.
    */
 
 {
   char    *next, *buf=s;
-  uint32_t baudrate;
-   uint8_t databits, parity, stopbits, flowcontrol;
+  uint32_t baudrate, port;
 
   /* parse (UART) */
   if (strncasecmp("UART", s, 4) == 0)
-    *port = atoi(s+4, &next);
+    port = atoi(s+4, &next);
   else if (!isdigit(*s))
   {
     strcpy(buf, "ERR: no uart port given\n");
     return -1;
   }
   else
-    *port = atoi(s, &next);
+    port = atoi(s, &next);
 
   printf(s);
   s = next;
 
-  if (*port != 1 && *port != 0)
+  if (port != 1 && port != 0)
   {
     strcpy(buf, "ERR: wrong uart port\n");
     return -1;
@@ -128,23 +141,6 @@ uart_parse_and_init(char *s, size_t *n, bool *framing_mode, uint32_t *port)
 
   printf(s);
 
-  /* parse [FRAMING] */
-  if (*s == 'F' || *s == 'f')
-  {
-    *framing_mode = true;
-    s++;
-  }
-  else if (*s == 'R' || *s == 'r')
-  {
-    *framing_mode = false;
-    s++;
-  }
-  else if (!isdigit(*s))
-  {
-    strcpy(buf, "ERR: framing or baudrate expected\n");
-    return -2;
-  }
-
   /* parse (BAUDRATE) */
   baudrate = atoi(s, &next);
   if (s==next) return false;
@@ -153,112 +149,37 @@ uart_parse_and_init(char *s, size_t *n, bool *framing_mode, uint32_t *port)
   while (isspace(*s))
     s++; /* ignore whitespace */
 
-  /* parse (DATABITS) */
-  switch(*s)
+  /* initialize uart port */
+  ringbuf_init(&uartbuf, uartbuf_data, sizeof(uartbuf_data));
+
+  if (port == 0)
   {
-    case '5':
-      databits = E_AHI_UART_WORD_LEN_5;
-      break;
-    case '6':
-      databits = E_AHI_UART_WORD_LEN_6;
-      break;
-    case '7':
-      databits = E_AHI_UART_WORD_LEN_7;
-      break;
-    case '8':
-      databits = E_AHI_UART_WORD_LEN_8;
-      break;
-    default:
-      strcpy(buf, "ERR: databits must be in range of 5-8\n");
-      return -3;
+    uart0_init(baudrate);
+    uart0_set_input(uart_cb_handler);
+    uart_writeb = uart0_writeb;
   }
-  s++;
-
-  /* parse (PARITY) */
-  switch(*s) {
-  case 'E':
-  case 'e':
-    parity = E_AHI_UART_EVEN_PARITY;
-    break;
-  case 'O':
-  case 'o':
-    parity = E_AHI_UART_ODD_PARITY;
-    break;
-  case 'N':
-  case 'n':
-    parity = E_AHI_UART_NO_PARITY;
-    break;
-  default:
-    strcpy(buf, "ERR: parity must be either E,O or N\n");
-    return -4;
-  }
-  s++;
-
-  /* parse (STOPBITS) */
-  switch(*s) {
-  case '2':
-    stopbits = E_AHI_UART_2_STOP_BITS;
-    break;
-  case '1':
-    stopbits = E_AHI_UART_1_STOP_BIT;
-    break;
-  default:
-    strcpy(buf, "ERR: stopbits must be 2 or 1\n");
-    return -5;
-  }
-  s++;
-
-  /* parse [FLOWCONTROL] */
-  while (isspace(*s))
-    s++; /* ignore whitespace */
-
-  if (strncasecmp("RTSCTS", s, 6) == 0)
-    flowcontrol = E_AHI_UART_RTSCTS_FLOWCTRL;
   else
-    flowcontrol = E_AHI_UART_NO_FLOWCTRL;
-
-  /* dest output, copy back to string */
   {
-    int c = 'N';
-
-    switch (parity) {
-      case E_AHI_UART_NO_PARITY:
-        c = 'N';
-        break;
-      case E_AHI_UART_EVEN_PARITY:
-        c = 'E';
-        break;
-      case E_AHI_UART_ODD_PARITY:
-        c = 'O';
-        break;
-      default:
-        c = 'W';
-        break;
-    }
-
-    *n = snprintf(buf, *n, "UART%d %c%d %d%c%d %s",
-                       *port, *framing_mode? 'F':'R', baudrate,
-                       databits+5, c, stopbits,
-                       flowcontrol==E_AHI_UART_RTSCTS_FLOWCTRL?"RTSCTS":"abc\n");
+    uart1_init(baudrate);
+    uart1_set_input(uart_cb_handler);
+    uart_writeb = uart1_writeb;
   }
 
-  uart_init(*port, baudrate, databits, parity, stopbits, flowcontrol);
   return 0;
 }
 
-PROCESS_THREAD(uart_process, ev, data)
+PROCESS_THREAD(stun_process, ev, data)
 {
   /* make sure the modeline fits! */
-  static char buf[800];
-  static uint16_t buf_len = 0;
-  static bool configured = false, framing_mode = false;
-  static uint32_t port = E_AHI_UART_0;
+  static bool configured = false;
+  static char buf[sizeof(uartbuf_data)+200];
+  static volatile uint16_t buf_len = 0;
 
   /* whenever these events happen, the process is to be restarted */
   if (ev == tcpip_event && (uip_aborted() || uip_timedout() || uip_closed()))
   {
-    process_exit(&uart_process);
-    process_start(&uart_process, NULL);
+    process_exit(&stun_process);
+    process_start(&stun_process, NULL);
     buf_len = configured = 0;
   }
 
@@ -308,7 +229,8 @@ PROCESS_THREAD(uart_process, ev, data)
       {
         static size_t m;
         m = buf_len;
-        configured = 0==uart_parse_and_init(buf, &m, &framing_mode, &port);
+
+        configured = 0==uart_parse_and_init(buf, &m);
 
         do { /* send the init message */
           m = strlen(buf);
@@ -327,30 +249,43 @@ PROCESS_THREAD(uart_process, ev, data)
     /* start i/o */
     while (1)
     {
-      /* on a event-based uart implementation, we would have a uart_event
-       * and check for new data there instead of using the uip poll event. */
-      PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
+      PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event ||
+                               ev == PROCESS_EVENT_POLL);
 
-      /* new data received, write it to uart */
-      if (uip_newdata())
+      /* XXX: possible problem here: a rexmit might get executed with packetbuf
+       * of different size, is this a problem? */
+      if (ev == PROCESS_EVENT_POLL)
       {
-        uart_write(port, uip_appdata, uip_datalen());
-        printf("%d bytes\n", uip_datalen());
+        int c;
+
+        while ((c=ringbuf_get(&uartbuf)) != -1 && buf_len < sizeof(buf))
+          buf[buf_len++] = (uint8_t) c;
+
+        /* uip_len == 0 is there to avoid overwriting any data in uip_buf that a
+         * process is waiting to get delivered. */
+        if (uip_len==0)
+          uip_send(buf, buf_len);
       }
-
-      if (uip_rexmit())
-        uip_send(buf, buf_len);
-
-      if (uip_acked())
-        buf_len = 0;
-
-      if ((uip_acked() || uip_poll()) && buf_len==0)
+      else if (ev == tcpip_event)
       {
-        buf_len = uart_read(port, buf, sizeof(buf));
-        printf("%d bytes polled\n", buf_len);
-        uip_send(buf, buf_len);
+        /* new data received, write it to uart */
+        if (uip_newdata())
+        {
+          size_t i;
+
+          for (i=0; i<uip_datalen(); i++)
+            uart_writeb(((char*) uip_appdata)[i]);
+
+          uip_len = 0;
+        }
+
+        if (uip_rexmit() || uip_poll())
+          uip_send(buf, buf_len);
+
+        if (uip_acked())
+          buf_len = 0;
       }
-    };
+    }
   }
 
   PROCESS_END();
